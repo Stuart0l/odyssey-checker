@@ -1,0 +1,52 @@
+name: Check for new Odyssey show dates
+
+on:
+  schedule:
+    # :23 rather than :00 -- GitHub's scheduler is busiest on the hour, so an
+    # off-peak minute measurably reduces how late the run starts.
+    - cron: '23 * * * *'
+  workflow_dispatch:
+    inputs:
+      force_alert:
+        description: 'Send an alert for the latest date (tests the email path)'
+        type: boolean
+        default: false
+
+# Never let two runs race on the state commit.
+concurrency:
+  group: odyssey-checker
+  cancel-in-progress: false
+
+permissions:
+  contents: write
+
+jobs:
+  check:
+    runs-on: ubuntu-latest
+    timeout-minutes: 10
+    steps:
+      - uses: actions/checkout@v4
+
+      - name: Check for new show dates
+        env:
+          SMTP_PASSWORD: ${{ secrets.SMTP_PASSWORD }}
+          SMTP_FROM: ${{ secrets.SMTP_FROM }}
+          SMTP_TO: ${{ secrets.SMTP_TO }}
+          FORCE_ALERT: ${{ inputs.force_alert }}
+        run: python3 check_odyssey.py --verbose
+
+      # Runs even if the check failed, so a queued (unsent) alert is persisted
+      # and retried next hour rather than lost with the failed run.
+      - name: Commit updated state
+        if: always()
+        run: |
+          if git diff --quiet -- state.json; then
+            echo "state unchanged"
+            exit 0
+          fi
+          git config user.name  "odyssey-checker[bot]"
+          git config user.email "41898282+github-actions[bot]@users.noreply.github.com"
+          git add state.json
+          git commit -m "state: $(python3 -c "import json;s=json.load(open('state.json'));print('latest',s['latest_date'])")"
+          git pull --rebase --autostash
+          git push

@@ -1,0 +1,25 @@
+# Non-secret configuration. Safe to commit.
+# Secrets (SMTP_PASSWORD, SMTP_FROM, SMTP_TO) come from the environment:
+# your shell locally, repo secrets in GitHub Actions.
+
+base_url = "https://www.cinemark.com"
+
+# Cinemark's internal id for this movie *in this format*. IMAX 70mm has its own
+# id, distinct from the standard release. Re-derive it with:
+#   curl -s -A 'Mozilla/5.0' <movie_url> | grep -o 'data-movieid="[0-9]*"'
+movie_id = 104867
+movie_url = "https://www.cinemark.com/movies/the-odyssey-imax-70mm"
+movie_name = "The Odyssey (IMAX 70mm)"
+movie_short_name = "Odyssey IMAX 70mm"
+
+# Theatre id, from the data on any theatre page:
+#   curl -s -A 'Mozilla/5.0' <theatre page> | grep -o 'TheaterId=[0-9]*'
+theater_id = 276
+theater_name = "Cinemark Seven Bridges and IMAX"
+
+# Fallback watermark, used only on a first run or if state.json is unreadable.
+# Anything strictly later than this counts as a new date worth emailing about.
+baseline_latest_date = "2026-09-30"
+
+smtp_host = "smtp.gmail.com"
+smtp_port = 587
