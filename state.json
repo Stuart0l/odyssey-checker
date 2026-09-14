@@ -5,7 +5,6 @@
   "consecutive_failures": 0,
   "health_alert_sent": false,
   "known_dates": [
-    "2026-09-13",
     "2026-09-14",
     "2026-09-15",
     "2026-09-16",
@@ -25,7 +24,7 @@
     "2026-09-30"
   ],
   "last_heartbeat": "2026-09-13T19:26:26.878070+00:00",
-  "last_success": "2026-09-14T01:14:10.100696+00:00",
+  "last_success": "2026-09-14T06:27:12.899751+00:00",
   "latest_date": "2026-09-30",
   "pending_alerts": []
 }
