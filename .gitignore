@@ -3,3 +3,8 @@ __pycache__/
 state.json.tmp
 state.json.corrupt
 .env
+
+# editor swap files
+*.swp
+*.swo
+*~

@@ -3,7 +3,8 @@
 Watches **Cinemark Seven Bridges and IMAX** (Woodridge, IL) for newly-released
 show dates of *The Odyssey* in **IMAX 70mm**, and emails as soon as one appears.
 
-Runs hourly on GitHub Actions. No server, no dependencies, no browser.
+Runs hourly as an Azure Function on a timer trigger. No server to maintain, no
+browser, and the checker itself has no dependencies.
 
 Current watermark: **2026-09-30**. Anything later triggers an alert.
 
@@ -25,25 +26,43 @@ The comparison is against a stored watermark, not against "what changed since
 last run", so **missed runs cost nothing** — a skipped hour or a whole skipped
 day is recovered automatically by the next run.
 
-State is committed back to this repo, which doubles as a log of exactly when
-Cinemark added each date.
+State lives in a blob in the Function App's storage account.
+
+### Why not GitHub Actions
+
+It was, for four days. GitHub's scheduled triggers are explicitly best-effort,
+and in practice they dropped about three of every four hourly slots: 22 runs
+where there should have been ~96, with gaps of 2 to 7.8 hours. Every run that
+did fire succeeded -- the checker was never the problem, the scheduler was.
+An Azure timer trigger is a real scheduler, so the hourly requirement is
+actually met. The workflow in `.github/` is kept as a manually-triggerable
+backup (`workflow_dispatch` runs are not throttled).
 
 ## Setup
 
 1. Create a Gmail **app password**: Google Account → Security → 2-Step
    Verification (must be on) → App passwords → "Mail". A normal account
-   password will not authenticate over SMTP.
+   password will not authenticate over SMTP. `SMTP_FROM` must be the Gmail
+   account that issued the password -- it doubles as the SMTP username, and
+   Gmail rejects a `From` that isn't the authenticated account or a verified
+   alias. `SMTP_TO` can be any address.
 
-2. Add three repo secrets (Settings → Secrets and variables → Actions):
+2. Set the three values as Function App settings:
 
-   | Secret | Value |
-   |---|---|
-   | `SMTP_PASSWORD` | the 16-character app password |
-   | `SMTP_FROM` | the Gmail address sending the mail |
-   | `SMTP_TO` | where alerts should arrive |
+   ```sh
+   az functionapp config appsettings set -g odyssey-checker-rg -n <app-name> \
+     --settings SMTP_PASSWORD='...' SMTP_FROM='...' SMTP_TO='...'
+   ```
 
-3. Actions → *Check for new Odyssey show dates* → **Run workflow** to confirm
-   it's green. Tick `force_alert` to also test the email path end to end.
+3. Deploy and confirm:
+
+   ```sh
+   az functionapp deployment source config-zip \
+     -g odyssey-checker-rg -n <app-name> --src app.zip --build-remote true
+   az functionapp logs tail -g odyssey-checker-rg -n <app-name>
+   ```
+
+The same three values are also GitHub repo secrets, for the backup workflow.
 
 ## Running locally
 
@@ -66,8 +85,8 @@ Failures are handled in tiers, each catching what the one below can't:
 | What fails | What happens |
 |---|---|
 | A single request | 3 retries with backoff; then the next hourly run |
-| A whole run | Workflow goes red → GitHub emails you |
-| A run is skipped entirely | Nothing to do — the next run re-reads everything |
+| A whole run | Non-zero exit raises, so it shows as a failed invocation in Azure |
+| A run is skipped entirely | Nothing to do — the next run re-reads everything. `use_monitor=True` also replays a schedule missed while the app was down |
 | The email won't send | Date is queued in `pending_alerts` and retried every run until it sends |
 | Cinemark changes the movie id | Empty result is detected and you get a "watcher may be broken" email |
 | The schedule stops firing | Daily heartbeat email — if it stops arriving, go look |
@@ -98,9 +117,17 @@ curl -s -A 'Mozilla/5.0' https://www.cinemark.com/theatres/il-woodridge/cinemark
 Cinemark's Cloudflare rejects the default Python user-agent with a 403, so the
 `-A` flag above isn't optional — and neither is the UA header the script sends.
 
+## Teardown
+
+Everything lives in one resource group:
+
+```sh
+az group delete -n odyssey-checker-rg --yes
+```
+
 ## Caveats
 
-- GitHub's scheduled triggers are best-effort and can run 10–30 minutes late.
-  Fine for "did they add October dates"; wrong tool for a precise on-sale moment.
 - The endpoint is Cinemark's own public AJAX call, not a contracted API. It can
   change shape without notice — which is what the health alert is for.
+- Timer schedules are UTC unless `WEBSITE_TIME_ZONE` is set. Irrelevant at
+  hourly cadence, but worth knowing before changing the cron.

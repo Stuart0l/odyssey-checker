@@ -89,8 +89,79 @@ def default_state() -> dict:
     }
 
 
-def load_state(cfg: dict) -> dict:
-    """Read state.json, degrading safely rather than silently re-seeding.
+class FileStateStore:
+    """State in a local file. Used when running the script directly."""
+
+    label = "state.json"
+
+    def __init__(self, path: Path = STATE_PATH):
+        self.path = path
+
+    def read(self) -> str | None:
+        return self.path.read_text() if self.path.exists() else None
+
+    def write(self, text: str) -> None:
+        # Atomic: a crash mid-write cannot leave a half-written file behind.
+        tmp = self.path.with_suffix(".json.tmp")
+        tmp.write_text(text)
+        tmp.replace(self.path)
+
+    def quarantine(self) -> str:
+        backup = self.path.with_suffix(".json.corrupt")
+        try:
+            self.path.replace(backup)
+        except OSError:
+            pass
+        return backup.name
+
+
+class BlobStateStore:
+    """State in an Azure blob. Used by the timer-triggered Function.
+
+    Blob writes are atomic server-side (a PUT either lands whole or not at
+    all), so this needs no temp-file dance -- but it must present the same
+    read/write/quarantine surface as the file store so the logic above it
+    never has to know which one it is talking to.
+    """
+
+    label = "state blob"
+
+    def __init__(self, connection_string: str, container: str, name: str):
+        from azure.storage.blob import BlobServiceClient  # Azure-only import
+
+        service = BlobServiceClient.from_connection_string(connection_string)
+        self.container_client = service.get_container_client(container)
+        try:
+            self.container_client.create_container()
+        except Exception:
+            pass  # already exists
+        self.name = name
+        self.blob = self.container_client.get_blob_client(name)
+
+    def read(self) -> str | None:
+        from azure.core.exceptions import ResourceNotFoundError
+
+        try:
+            return self.blob.download_blob().readall().decode("utf-8")
+        except ResourceNotFoundError:
+            return None
+
+    def write(self, text: str) -> None:
+        self.blob.upload_blob(text.encode("utf-8"), overwrite=True)
+
+    def quarantine(self) -> str:
+        corrupt_name = f"{self.name}.corrupt"
+        try:
+            body = self.blob.download_blob().readall()
+            self.container_client.get_blob_client(corrupt_name).upload_blob(
+                body, overwrite=True)
+        except Exception as exc:
+            log.warning("could not preserve corrupt state: %s", exc)
+        return corrupt_name
+
+
+def load_state(cfg: dict, store) -> dict:
+    """Read stored state, degrading safely rather than silently re-seeding.
 
     A corrupt state file is the one case where the obvious recovery is wrong:
     re-seeding from whatever the site says today would quietly adopt any new
@@ -99,23 +170,27 @@ def load_state(cfg: dict) -> dict:
     over a missed one, which is the whole point of the tool.
     """
     state = default_state()
-    if not STATE_PATH.exists():
-        log.info("no state file yet; will seed a baseline this run")
+    try:
+        raw = store.read()
+    except Exception as exc:
+        log.error("could not read %s (%s); using the configured baseline",
+                  store.label, exc)
+        state["latest_date"] = cfg.get("baseline_latest_date")
+        return state
+
+    if raw is None:
+        log.info("no %s yet; will seed a baseline this run", store.label)
         state["latest_date"] = cfg.get("baseline_latest_date")
         return state
 
     try:
-        loaded = json.loads(STATE_PATH.read_text())
+        loaded = json.loads(raw)
         if not isinstance(loaded, dict):
-            raise ValueError("state.json is not an object")
-    except (json.JSONDecodeError, ValueError, OSError) as exc:
-        backup = STATE_PATH.with_suffix(".json.corrupt")
-        try:
-            STATE_PATH.replace(backup)
-        except OSError:
-            pass
-        log.error("state.json unreadable (%s); backed up to %s and falling back "
-                  "to the configured baseline", exc, backup.name)
+            raise ValueError(f"{store.label} is not an object")
+    except (json.JSONDecodeError, ValueError) as exc:
+        backup = store.quarantine()
+        log.error("%s unreadable (%s); preserved as %s and falling back "
+                  "to the configured baseline", store.label, exc, backup)
         state["latest_date"] = cfg.get("baseline_latest_date")
         return state
 
@@ -125,11 +200,8 @@ def load_state(cfg: dict) -> dict:
     return state
 
 
-def save_state(state: dict) -> None:
-    """Write atomically so a crash mid-write cannot corrupt the file."""
-    tmp = STATE_PATH.with_suffix(".json.tmp")
-    tmp.write_text(json.dumps(state, indent=2, sort_keys=True) + "\n")
-    tmp.replace(STATE_PATH)
+def save_state(state: dict, store) -> None:
+    store.write(json.dumps(state, indent=2, sort_keys=True) + "\n")
 
 
 # --------------------------------------------------------------------------
@@ -288,7 +360,8 @@ def build_alert(cfg: dict, days: list[date]) -> tuple[str, str]:
 # main
 # --------------------------------------------------------------------------
 
-def run_check(cfg: dict, state: dict, *, dry_run: bool, force_alert: bool) -> int:
+def run_check(cfg: dict, state: dict, store, *, dry_run: bool,
+              force_alert: bool) -> int:
     """Returns the process exit code."""
     now = datetime.now(timezone.utc)
 
@@ -302,7 +375,7 @@ def run_check(cfg: dict, state: dict, *, dry_run: bool, force_alert: bool) -> in
                 and not state["health_alert_sent"] and not dry_run):
             maybe_send_health_alert(cfg, state, reason=str(exc))
         if not dry_run:
-            save_state(state)
+            save_state(state, store)
         return 1
 
     log.info("found %d show dates%s", len(dates),
@@ -321,7 +394,7 @@ def run_check(cfg: dict, state: dict, *, dry_run: bool, force_alert: bool) -> in
                 reason=f"the API returned no dates at all for movie id "
                        f"{cfg['movie_id']}. Cinemark most likely reissued the id.")
         if not dry_run:
-            save_state(state)
+            save_state(state, store)
         return 1
 
     state["consecutive_failures"] = 0
@@ -338,7 +411,7 @@ def run_check(cfg: dict, state: dict, *, dry_run: bool, force_alert: bool) -> in
         state["known_dates"] = [d.isoformat() for d in dates]
         log.info("seeded baseline at %s; no alert on first run", dates[-1])
         if not dry_run:
-            save_state(state)
+            save_state(state, store)
         return 0
 
     new_dates = [d for d in dates
@@ -381,7 +454,7 @@ def run_check(cfg: dict, state: dict, *, dry_run: bool, force_alert: bool) -> in
             exit_code = send_heartbeat_if_due(cfg, state, now)
 
     if not dry_run:
-        save_state(state)
+        save_state(state, store)
     return exit_code
 
 
@@ -471,7 +544,8 @@ def main() -> int:
     )
 
     cfg = load_config()
-    state = load_state(cfg)
+    store = FileStateStore()
+    state = load_state(cfg, store)
 
     if args.status:
         print_status(state)
@@ -487,7 +561,7 @@ def main() -> int:
         state.update(latest_date=dates[-1].isoformat(),
                      known_dates=[d.isoformat() for d in dates],
                      alerted_dates=[], pending_alerts=[])
-        save_state(state)
+        save_state(state, store)
         log.info("baseline reset to %s", dates[-1])
         return 0
 
@@ -499,7 +573,7 @@ def main() -> int:
         time.sleep(delay)
 
     force = args.force_alert or os.environ.get("FORCE_ALERT") == "true"
-    return run_check(cfg, state, dry_run=args.dry_run, force_alert=force)
+    return run_check(cfg, state, store, dry_run=args.dry_run, force_alert=force)
 
 
 if __name__ == "__main__":
