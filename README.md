@@ -37,13 +37,11 @@ did fire succeeded -- the checker was never the problem, the scheduler was.
 An Azure timer trigger is a real scheduler, so the hourly requirement is
 actually met.
 
-The GitHub workflow is deliberately left running on its throttled schedule as
-redundancy -- an unreliable second watcher still beats none if the Function App
-breaks. The two keep SEPARATE state (repo `state.json` vs the Azure blob), so a
-genuinely new date will produce two emails, one from each. That duplication is
-the price of the redundancy, not a bug. To stop it, delete the `schedule:`
-trigger from `.github/workflows/check.yml`; `workflow_dispatch` runs are never
-throttled, so the workflow stays useful as a manual fallback either way.
+The GitHub workflow is now dispatch-only -- its schedule was removed once the
+Azure timer was confirmed firing on time (observed: exactly on the :23 slot).
+It stays as a manual fallback, since `workflow_dispatch` runs are never
+throttled: if the Function App ever breaks, `Run workflow` still performs a
+full check and emails from the repo's own copy of the state.
 
 ## Setup
 

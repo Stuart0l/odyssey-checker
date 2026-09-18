@@ -1,10 +1,10 @@
 name: Check for new Odyssey show dates
 
+# No schedule here on purpose. The hourly check runs as an Azure Function (see
+# README); GitHub's scheduler was dropping ~3 of every 4 slots, and leaving it
+# on meant a second watcher with its own state emailing duplicates.
+# Kept dispatch-only as a manual fallback -- those runs are never throttled.
 on:
-  schedule:
-    # :23 rather than :00 -- GitHub's scheduler is busiest on the hour, so an
-    # off-peak minute measurably reduces how late the run starts.
-    - cron: '23 * * * *'
   workflow_dispatch:
     inputs:
       force_alert:
